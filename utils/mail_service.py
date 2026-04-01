@@ -607,7 +607,7 @@ def get_oai_code(
                     print(f"\n[{cfg.ts()}] [ERROR] LuckMail 缺少 token，无法提取验证码！")
                     return ""
                 try:
-                    from luckmail_service import LuckMailService
+                    from utils.luckmail_service import LuckMailService
                     lm_service = LuckMailService(api_key=cfg.LUCKMAIL_API_KEY)
 
                     code = lm_service.get_code(jwt)
