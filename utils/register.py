@@ -35,10 +35,14 @@ def _patched_launch(self, *args, **kwargs):
                 new_proxy["password"] = urllib.parse.unquote(parsed.password)
 
             kwargs["proxy"] = new_proxy
+
     args_list = kwargs.get("args", [])
     if "--disable-dev-shm-usage" not in args_list:
         args_list.append("--disable-dev-shm-usage")
     kwargs["args"] = args_list
+
+    return _original_launch(self, *args, **kwargs)
+
 BrowserType.launch = _patched_launch
 
 
