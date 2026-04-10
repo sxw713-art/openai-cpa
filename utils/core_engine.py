@@ -20,7 +20,7 @@ import string
 import yaml
 import urllib.parse
 from concurrent.futures import ThreadPoolExecutor
-from typing import Any, Optional, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
 from curl_cffi import requests, CurlMime
 import queue
 from datetime import datetime, timezone, timedelta
@@ -37,7 +37,9 @@ from utils.tg_notifier import send_tg_msg_sync
 _stats_lock = threading.Lock()
 sub_fail_counts = {}
 _heal_lock = threading.Lock()
+_sub2api_registry_lock = threading.Lock()
 DEFAULT_CLIPROXY_UA = "codex_cli_rs/0.76.0 (Debian 13.0.0; x86_64) WindowsTerminal"
+SUB2API_PUSH_REGISTRY_KEY = "sub2api_pushed_registry"
 run_stats = {
     "success": 0,
     "failed": 0,
@@ -725,6 +727,145 @@ def _handle_sub2api_dead_account(item: dict, client: Any, is_disabled: bool) -> 
     else:
         print(f"[{ts()}] [ERROR] 凭证 {mask_email(name)} 已死亡，当前已是禁用状态，根据配置保留不删除。")
 
+def _sub2api_account_identifiers_from_token(token_data: Dict[str, Any]) -> Set[str]:
+    identifiers: Set[str] = set()
+    email = str(token_data.get("email") or "").strip().lower()
+    refresh_token = str(token_data.get("refresh_token") or "").strip()
+    account_id = str(token_data.get("account_id") or token_data.get("chatgpt_account_id") or "").strip()
+    if email:
+        identifiers.add(f"email:{email}")
+    if refresh_token:
+        identifiers.add(f"refresh:{refresh_token}")
+    if account_id:
+        identifiers.add(f"account:{account_id}")
+    return identifiers
+
+def _sub2api_account_identifiers_from_remote(item: Dict[str, Any]) -> Set[str]:
+    credentials = item.get("credentials", {}) if isinstance(item, dict) else {}
+    return _sub2api_account_identifiers_from_token({
+        "email": item.get("name") or credentials.get("email") or "",
+        "refresh_token": credentials.get("refresh_token") or "",
+        "chatgpt_account_id": credentials.get("chatgpt_account_id") or credentials.get("account_id") or "",
+    })
+
+def _get_sub2api_push_registry() -> Dict[str, Any]:
+    registry = db_manager.get_sys_kv(SUB2API_PUSH_REGISTRY_KEY, {})
+    return registry if isinstance(registry, dict) else {}
+
+def is_sub2api_push_recorded(token_data: Dict[str, Any]) -> bool:
+    registry = _get_sub2api_push_registry()
+    identifiers = _sub2api_account_identifiers_from_token(token_data)
+    return any(identifier in registry for identifier in identifiers)
+
+def mark_sub2api_push_recorded(token_data: Dict[str, Any], source: str = "unknown") -> None:
+    identifiers = _sub2api_account_identifiers_from_token(token_data)
+    if not identifiers:
+        return
+
+    email = str(token_data.get("email") or "").strip().lower()
+    account_id = str(token_data.get("account_id") or token_data.get("chatgpt_account_id") or "").strip()
+    payload = {
+        identifier: {
+            "email": email,
+            "account_id": account_id,
+            "source": source,
+            "marked_at": datetime.now(timezone.utc).isoformat(),
+        }
+        for identifier in identifiers
+    }
+    with _sub2api_registry_lock:
+        db_manager.update_sys_kv_dict(SUB2API_PUSH_REGISTRY_KEY, payload)
+
+def _sub2api_should_delete_for_bad_status(item: Dict[str, Any]) -> Tuple[bool, str]:
+    status = str(item.get("status") or "").strip().lower()
+    disabled = bool(item.get("disabled", False))
+    schedulable = item.get("schedulable")
+    error_message = str(item.get("error_message") or "").strip()
+    temp_reason = str(item.get("temp_unschedulable_reason") or "").strip()
+
+    if disabled:
+        return True, "disabled"
+    if status in {"error", "invalid", "expired", "disabled", "deleted"}:
+        return True, f"status={status}"
+    if schedulable is False and (error_message or temp_reason):
+        return True, f"unschedulable:{(error_message or temp_reason)[:80]}"
+    return False, ""
+
+def _cleanup_sub2api_bad_status_accounts(account_list: List[Dict[str, Any]], client: Any) -> int:
+    deleted = 0
+    for item in account_list:
+        should_delete, reason = _sub2api_should_delete_for_bad_status(item)
+        if not should_delete:
+            continue
+        account_id = item.get("id")
+        name = item.get("name", "unknown")
+        if not account_id:
+            continue
+        print(f"[{ts()}] [WARNING] Sub2API状态异常，删除账号 {mask_email(name)} ({reason})")
+        ok, msg = client.delete_account(account_id)
+        if ok:
+            deleted += 1
+        else:
+            print(f"[{ts()}] [ERROR] 删除异常 Sub2API 账号失败: {msg}")
+    return deleted
+
+def _build_sub2api_existing_identifier_set(account_list: List[Dict[str, Any]]) -> Set[str]:
+    identifiers: Set[str] = set()
+    for item in account_list:
+        identifiers.update(_sub2api_account_identifiers_from_remote(item))
+    return identifiers
+
+def backfill_sub2api_push_registry_from_remote(token_list: List[Dict[str, Any]], account_list: List[Dict[str, Any]]) -> Set[str]:
+    matched_emails: Set[str] = set()
+    if not token_list or not account_list:
+        return matched_emails
+
+    existing_identifiers = _build_sub2api_existing_identifier_set(account_list)
+    for token_data in token_list:
+        identifiers = _sub2api_account_identifiers_from_token(token_data)
+        if not identifiers:
+            continue
+        if identifiers & existing_identifiers:
+            mark_sub2api_push_recorded(token_data, source="remote_backfill")
+            email = str(token_data.get("email") or "").strip()
+            if email:
+                matched_emails.add(email)
+    return matched_emails
+
+def _push_local_accounts_to_sub2api(client: Any, existing_identifiers: Set[str], limit: int) -> int:
+    if limit <= 0:
+        return 0
+
+    pushed = 0
+    seen_local: Set[str] = set()
+    for token_data in db_manager.get_all_tokens():
+        identifiers = _sub2api_account_identifiers_from_token(token_data)
+        if not identifiers:
+            continue
+        if identifiers & seen_local:
+            continue
+        seen_local.update(identifiers)
+
+        if identifiers & existing_identifiers:
+            continue
+        if is_sub2api_push_recorded(token_data):
+            continue
+
+        email = str(token_data.get("email") or "unknown")
+        ok, msg = client.add_account(token_data)
+        if ok:
+            pushed += 1
+            existing_identifiers.update(identifiers)
+            mark_sub2api_push_recorded(token_data, source="auto_local")
+            print(f"[{ts()}] [SUCCESS] 本地账号已补推到 Sub2API: {mask_email(email)}")
+        else:
+            print(f"[{ts()}] [ERROR] 本地账号补推 Sub2API 失败 {mask_email(email)}: {msg}")
+
+        if pushed >= limit:
+            break
+
+    return pushed
+
 def process_sub2api_worker(i: int, total: int, item: dict, client: Any, args: Any) -> bool:
     """Sub2API 测活 Worker（使用 Sub2API /test SSE 接口）"""
     if hasattr(args, 'check_stop') and args.check_stop(): return False
@@ -1104,13 +1245,38 @@ async def sub2api_main_loop(args, async_stop_event: asyncio.Event):
                 valid_count = total_files
                 print(f"[{ts()}] [INFO] 当前云端总数: {total_files} (未开启自动巡检，默认全部视为有效)")
 
+            if account_list:
+                deleted_bad_status = _cleanup_sub2api_bad_status_accounts(account_list, client)
+                if deleted_bad_status > 0:
+                    print(f"[{ts()}] [INFO] 已清理 {deleted_bad_status} 个状态异常的 Sub2API 账号，重新拉取库存...")
+                    success, account_list = client.get_all_accounts()
+                    if not success:
+                        print(f"[{ts()}] [ERROR] 清理后重新获取 Sub2API 库存失败: {account_list}")
+                        try:
+                            await asyncio.wait_for(async_stop_event.wait(), timeout=60)
+                        except asyncio.TimeoutError:
+                            pass
+                        continue
+                    total_files = len(account_list)
+                    valid_count = total_files if not cfg.SUB2API_AUTO_CHECK else min(valid_count, total_files)
+
             if valid_count < cfg.SUB2API_MIN_THRESHOLD:
-                need_to_reg          = cfg.SUB2API_BATCH_COUNT
+                need_to_reg = cfg.SUB2API_BATCH_COUNT
                 global run_stats
                 run_stats["target"] += need_to_reg
                 success_in_this_cycle = 0
                 print(f"[{ts()}] [INFO] 库存不足 ({valid_count} < {cfg.SUB2API_MIN_THRESHOLD})，启动补货...")
                 await asyncio.sleep(1)
+
+                existing_identifiers = _build_sub2api_existing_identifier_set(account_list)
+                pushed_from_local = _push_local_accounts_to_sub2api(
+                    client,
+                    existing_identifiers,
+                    need_to_reg,
+                )
+                success_in_this_cycle += pushed_from_local
+                if pushed_from_local:
+                    print(f"[{ts()}] [SUCCESS] 本轮已从本地账号库自动补推 {pushed_from_local} 个账号到 Sub2API")
 
                 def _sub2api_run_wrapper(p, skip_switch):
                     p = format_docker_url(p)
@@ -1125,7 +1291,9 @@ async def sub2api_main_loop(args, async_stop_event: asyncio.Event):
                         token_dict = json.loads(result[0])
                         if hasattr(client, "add_account"):
                             ok, msg = client.add_account(token_dict)
-                            if ok: print(f"[{ts()}] [SUCCESS] Sub2API 补货入库成功")
+                            if ok:
+                                mark_sub2api_push_recorded(token_dict, source="auto_register")
+                                print(f"[{ts()}] [SUCCESS] Sub2API 补货入库成功")
                             else: print(f"[{ts()}] [ERROR] Sub2API 补货入库失败: {msg}")
                     return status
 

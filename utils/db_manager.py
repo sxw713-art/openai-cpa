@@ -96,6 +96,32 @@ def get_tokens_by_emails(emails: list) -> list:
             return export_list
     except Exception as e:
         return []
+
+def get_all_tokens(limit: int = 0) -> list:
+    """按最新顺序提取本地账号库中的全部 Token 数据。"""
+    try:
+        with sqlite3.connect(DB_PATH, timeout=10) as conn:
+            c = conn.cursor()
+            sql = "SELECT token_data FROM accounts ORDER BY id DESC"
+            params = ()
+            if limit and limit > 0:
+                sql += " LIMIT ?"
+                params = (limit,)
+            c.execute(sql, params)
+            rows = c.fetchall()
+
+            tokens = []
+            for row in rows:
+                if not row or not row[0]:
+                    continue
+                try:
+                    tokens.append(json.loads(row[0]))
+                except Exception:
+                    pass
+            return tokens
+    except Exception as e:
+        print(f"[{ts()}] [ERROR] 读取全部 Token 失败: {e}")
+        return []
         
 def delete_accounts_by_emails(emails: list) -> bool:
     """批量从数据库中删除账号"""
@@ -151,3 +177,16 @@ def get_sys_kv(key: str, default=None):
     except Exception:
         pass
     return default
+
+def update_sys_kv_dict(key: str, updates: dict) -> dict:
+    """更新 system_kv 中的字典值并返回更新后的结果。"""
+    try:
+        current = get_sys_kv(key, {})
+        if not isinstance(current, dict):
+            current = {}
+        current.update(updates or {})
+        set_sys_kv(key, current)
+        return current
+    except Exception as e:
+        print(f"[{ts()}] [ERROR] 更新系统字典配置失败: {e}")
+        return get_sys_kv(key, {}) or {}

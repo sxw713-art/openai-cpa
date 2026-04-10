@@ -524,6 +524,27 @@ def get_cf_global_status(main_domain: str, token: str = Depends(verify_token)):
 @app.get("/api/accounts")
 async def get_accounts(page: int = Query(1), page_size: int = Query(50), token: str = Depends(verify_token)):
     result = db_manager.get_accounts_page(page, page_size)
+    emails = [item.get("email") for item in result["data"] if item.get("email")]
+    token_list = db_manager.get_tokens_by_emails(emails)
+    token_map = {item.get("email"): item for item in token_list}
+    backfilled_emails = set()
+    if getattr(core_engine.cfg, 'ENABLE_SUB2API_MODE', False) and getattr(core_engine.cfg, 'SUB2API_URL', '') and getattr(core_engine.cfg, 'SUB2API_KEY', '') and token_list:
+        try:
+            client = Sub2APIClient(
+                api_url=getattr(core_engine.cfg, 'SUB2API_URL', ''),
+                api_key=getattr(core_engine.cfg, 'SUB2API_KEY', ''),
+            )
+            success, account_list = client.get_all_accounts()
+            if success:
+                backfilled_emails = core_engine.backfill_sub2api_push_registry_from_remote(token_list, account_list)
+        except Exception:
+            backfilled_emails = set()
+    for item in result["data"]:
+        token_data = token_map.get(item.get("email"))
+        item["sub2api_pushed"] = bool(
+            item.get("email") in backfilled_emails or
+            (token_data and core_engine.is_sub2api_push_recorded(token_data))
+        )
     return {
         "status": "success", 
         "data": result["data"],
@@ -576,6 +597,7 @@ def account_action(data: dict, token: str = Depends(verify_token)):
             client = Sub2APIClient(api_url=sub2api_url, api_key=sub2api_key)
             success, resp = client.add_account(token_data)
             if success:
+                core_engine.mark_sub2api_push_recorded(token_data, source="manual_push")
                 print(f"[{core_engine.ts()}] [系统] 账号 {email} 已同步至 Sub2API！")
                 return {"status": "success", "message": f"账号 {email} 已同步至 Sub2API！"}
             print(f"[{core_engine.ts()}] [系统] Sub2API 推送失败")

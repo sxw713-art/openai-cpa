@@ -487,9 +487,13 @@ createApp({
             for (let i = 0; i < this.selectedAccounts.length; i++) {
                 const acc = this.selectedAccounts[i];
                 try {
-                    await this.authFetch('/api/account/action', {
+                    const res = await this.authFetch('/api/account/action', {
                         method: 'POST', body: JSON.stringify({ email: acc.email, action: 'push_sub2api' })
                     });
+                    const result = await res.json();
+                    if (result.status === 'success') {
+                        acc.sub2api_pushed = true;
+                    }
                 } catch (e) {}
                 await new Promise(r => setTimeout(r, 500));
             }
@@ -506,6 +510,9 @@ createApp({
                     method: 'POST', body: JSON.stringify({ email: account.email, action: action })
                 });
                 const result = await res.json();
+                if (action === 'push_sub2api' && result.status === 'success') {
+                    account.sub2api_pushed = true;
+                }
                 this.showToast(result.message, result.status);
             } catch (e) {}
         },

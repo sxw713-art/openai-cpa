@@ -262,12 +262,13 @@
                                             <th class="px-4 md:px-6 py-3 md:py-4 text-left text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-wider min-w-[150px]">邮箱账号</th>
                                             <th class="px-4 md:px-6 py-3 md:py-4 text-left text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-wider min-w-[120px]">登录密码</th>
                                             <th class="px-4 md:px-6 py-3 md:py-4 text-left text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-wider min-w-[120px]">入库（北京时间）</th>
+                                            <th class="px-4 md:px-6 py-3 md:py-4 text-center text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-wider min-w-[120px]">推送状态</th>
                                             <th class="px-4 md:px-6 py-3 md:py-4 text-center text-[10px] md:text-xs font-bold text-gray-500 uppercase tracking-wider min-w-[160px]">操作</th>
                                         </tr>
                                     </thead>
                                     <tbody class="bg-white divide-y divide-gray-100">
                                         <tr v-if="accounts.length === 0">
-                                            <td colspan="5" class="px-6 py-12 text-center text-sm md:text-base text-gray-400 font-medium">暂无本地记录</td>
+                                            <td colspan="6" class="px-6 py-12 text-center text-sm md:text-base text-gray-400 font-medium">暂无本地记录</td>
                                         </tr>
                                         <tr v-for="(acc, index) in accounts" :key="index" class="hover:bg-blue-50/50 transition duration-150" :class="{'bg-blue-50/80': selectedAccounts.includes(acc)}">
                                             <td class="px-4 md:px-6 py-3 md:py-4 whitespace-nowrap"><input type="checkbox" :value="acc" v-model="selectedAccounts" class="form-checkbox w-4 h-4 text-blue-600 rounded"></td>
@@ -280,6 +281,14 @@
                                             </td>
                                             <td class="px-4 md:px-6 py-3 md:py-4 whitespace-nowrap text-xs md:text-sm text-gray-500 font-mono bg-white rounded px-2 border">
                                             {{ formatTime(acc.created_at) }}
+                                            </td>
+                                            <td class="px-4 md:px-6 py-3 md:py-4 whitespace-nowrap text-center">
+                                                <span
+                                                    class="inline-flex items-center rounded-full px-2.5 py-1 text-[11px] md:text-xs font-bold"
+                                                    :class="acc.sub2api_pushed ? 'bg-purple-100 text-purple-700' : 'bg-gray-100 text-gray-500'"
+                                                >
+                                                    {{ acc.sub2api_pushed ? '已推送' : '未推送' }}
+                                                </span>
                                             </td>
                                             <td class="px-4 md:px-6 py-3 md:py-4 whitespace-nowrap text-center text-xs md:text-sm font-medium flex gap-1 justify-center">
                                                 <button @click="triggerAccountAction(acc, 'push')" class="text-green-700 bg-green-100 hover:bg-green-200 px-2 py-1 md:px-3 rounded-md transition font-bold shadow-sm">推CPA</button>
