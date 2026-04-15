@@ -1,6 +1,6 @@
 # update-dev.ps1
-# sxw-main: 拉代码 + build 镜像 + 更新容器
-# wenfxl:   直接拉 Docker Hub 最新镜像 + 更新容器
+# sxw-main:  拉代码 + build 镜像 + 更新容器
+# wenfxl-main: 拉代码 + build 镜像 + 更新容器
 
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 
@@ -21,24 +21,43 @@ if ($hasChanges) {
     if ($LASTEXITCODE -ne 0) { Err "git stash 失败" }
 }
 
-# ─── 1. 更新 sxw 版本（从源码 build）───────────────────────────
-Log ">>> [1/2] 切换到 sxw-main，拉取最新代码..."
+# ─── 1. 更新 sxw 版本（从源码 build）────────────────────────────
+Log ">>> [1/4] 切换到 sxw-main，拉取最新代码..."
 git checkout sxw-main
 if ($LASTEXITCODE -ne 0) { Err "切换 sxw-main 失败" }
 
 git pull sxw713 main
 if ($LASTEXITCODE -ne 0) { Err "拉取 sxw713/main 失败" }
 
-Log "构建 sxw-codex:latest 镜像..."
+Log ">>> [2/4] 构建 sxw-codex:latest 镜像..."
 docker build -f Dockerfile.dev -t sxw-codex:latest .
 if ($LASTEXITCODE -ne 0) { Err "构建 sxw-codex 镜像失败" }
 Success "sxw-codex:latest 构建完成"
 
-# ─── 2. 更新 wenfxl 版本（直接拉 Docker Hub）────────────────────
-Log ">>> [2/2] 拉取 wenfxl/wenfxl-codex-manager:latest 最新镜像..."
-docker pull wenfxl/wenfxl-codex-manager:latest
-if ($LASTEXITCODE -ne 0) { Err "拉取 wenfxl Docker Hub 镜像失败（请检查网络）" }
-Success "wenfxl/wenfxl-codex-manager:latest 拉取完成"
+# ─── 2. 更新 wenfxl 版本（从源码 build）─────────────────────────
+Log ">>> [3/4] 切换到 wenfxl-main，拉取最新代码..."
+git checkout wenfxl-main
+if ($LASTEXITCODE -ne 0) { Err "切换 wenfxl-main 失败" }
+
+git pull wenfxl main
+if ($LASTEXITCODE -ne 0) { Err "拉取 wenfxl/main 失败" }
+
+# Dockerfile.dev 在 wenfxl-main 分支不存在，临时创建
+$dockerfileContent = @"
+FROM openai-cpa-local:latest AS base
+WORKDIR /app
+COPY . .
+RUN rm -rf utils/auth_core/*.py 2>/dev/null || true
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "wfxl_openai_regst.py"]
+"@
+$dockerfileContent | Out-File -FilePath "Dockerfile.dev" -Encoding utf8 -NoNewline
+
+Log ">>> [4/4] 构建 wenfxl-codex:latest 镜像..."
+docker build -f Dockerfile.dev -t wenfxl-codex:latest .
+if ($LASTEXITCODE -ne 0) { Remove-Item -Force Dockerfile.dev; Err "构建 wenfxl-codex 镜像失败" }
+Remove-Item -Force Dockerfile.dev
+Success "wenfxl-codex:latest 构建完成"
 
 # ─── 3. 还原分支和 stash ─────────────────────────────────────────
 Log "还原分支到 $currentBranch..."

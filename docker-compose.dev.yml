@@ -13,7 +13,7 @@ services:
       - ./data-sxw:/app/data
 
   wenfxl-codex:
-    image: wenfxl/wenfxl-codex-manager:latest
+    image: wenfxl-codex:latest
     container_name: wenfxl_codex_manager
     ports:
       - "8000:8000"
