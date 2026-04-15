@@ -1,0 +1,11 @@
+FROM openai-cpa-local:latest AS base
+
+WORKDIR /app
+
+COPY . .
+
+RUN rm -rf utils/auth_core/*.py 2>/dev/null || true
+
+ENV PYTHONUNBUFFERED=1
+
+CMD ["python", "wfxl_openai_regst.py"]
